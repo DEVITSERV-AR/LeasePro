@@ -47,19 +47,139 @@ def compute_irr(cashflows, low=-0.9999, high=10.0, tol=1e-7, max_iter=200):
     if npv_low * npv_high > 0:
         return None
 
+    a = low
+    b = high
     for _ in range(max_iter):
-        mid = (low + high) / 2.0
+        mid = (a + b) / 2.0
         npv_mid = npv(mid, cfs)
         if abs(npv_mid) < tol:
             return mid
         if npv_low * npv_mid < 0:
-            high = mid
+            b = mid
             npv_high = npv_mid
         else:
-            low = mid
+            a = mid
             npv_low = npv_mid
 
-    return (low + high) / 2.0
+    return (a + b) / 2.0
+
+
+def generate_ai_suggestions(I, rent_excl, rent_incl,
+                            total_invested, net_financing,
+                            total_gst, total_inflow_all,
+                            annual_irr_excl, annual_irr_incl):
+    """
+    Generates AI-style suggestions as a list of bullet points.
+    I = inputs dict from session_state
+    """
+    suggestions = []
+
+    interest_rate = I["interest_rate"]
+    residual_value = I["residual_value"]
+    payment_timing = I["payment_timing"]
+    payment_interval = I["payment_interval"]
+    security_deposit = I["security_deposit"]
+    deposit_type = I["deposit_type"]
+
+    # 1. Compare realised IRR vs nominal rate (excl GST)
+    if annual_irr_excl is not None:
+        nominal = interest_rate
+        realised_pct = annual_irr_excl * 100
+        diff = realised_pct - nominal
+
+        if diff > 0.5:
+            suggestions.append(
+                f"Realised pre-tax IRR (excl GST) is about {realised_pct:.2f}%, "
+                f"which is higher than the nominal rate {nominal:.2f}%. "
+                f"This is mainly because of residual value / fees / deposit structure."
+            )
+        elif diff < -0.5:
+            suggestions.append(
+                f"Realised pre-tax IRR (excl GST) is about {realised_pct:.2f}%, "
+                f"which is below the nominal rate {nominal:.2f}%. "
+                f"To improve IRR, consider slightly higher EMI, lower residual, "
+                f"or additional processing fee / non-refundable charges."
+            )
+        else:
+            suggestions.append(
+                f"Realised pre-tax IRR (excl GST) ≈ {realised_pct:.2f}% is broadly aligned with "
+                f"the nominal rate {nominal:.2f}%."
+            )
+    else:
+        suggestions.append(
+            "Could not compute a stable IRR (excl GST). "
+            "Check that there is at least one negative and one positive cashflow."
+        )
+
+    # 2. Residual level
+    if residual_value > 0 and total_invested > 0:
+        res_pct = residual_value / total_invested * 100
+        if res_pct >= 20:
+            suggestions.append(
+                f"Residual value is about {res_pct:.1f}% of the total invested cost. "
+                "High residuals make IRR more sensitive to the realisable value at end of term."
+            )
+        else:
+            suggestions.append(
+                f"Residual value is about {res_pct:.1f}% of the total invested cost. "
+                "You can fine-tune IRR by adjusting this residual up or down."
+            )
+
+    # 3. Payment timing
+    if payment_timing == "Arrears (End of month)":
+        suggestions.append(
+            "Rentals are structured in arrears. If lessee cashflow permits, shifting to "
+            "advance rentals (start of period) will generally improve IRR for the lessor "
+            "at the same EMI level."
+        )
+    else:
+        suggestions.append(
+            "Rentals are structured in advance. This already gives a better IRR than an "
+            "arrears structure at the same EMI, from the lessor's perspective."
+        )
+
+    # 4. Deposit insight
+    if security_deposit > 0:
+        if deposit_type == "Refundable at end":
+            suggestions.append(
+                f"There is a refundable security deposit of ₹ {security_deposit:,.2f}. "
+                "This supports risk mitigation but has a moderate impact on IRR since it is refunded at the end."
+            )
+        elif deposit_type == "Non-refundable":
+            suggestions.append(
+                f"There is a non-refundable security deposit of ₹ {security_deposit:,.2f}. "
+                "This materially boosts IRR. Ensure commercial justification and clear documentation with the customer."
+            )
+        else:
+            suggestions.append(
+                f"A security deposit of ₹ {security_deposit:,.2f} is taken. "
+                "Consider clarifying whether it is refundable or non-refundable in your credit policy."
+            )
+
+    # 5. PTPM / PTPQ hint
+    if net_financing > 0 and rent_excl > 0:
+        per_thousand = rent_excl / (net_financing / 1000.0)
+        freq_label = "PTPM" if payment_interval == 1 else "PTPQ"
+        suggestions.append(
+            f"Current rental works out to about {per_thousand:.4f} {freq_label} on net financing. "
+            "You can use this as a benchmark to compare similar deals."
+        )
+
+    # 6. GST & inflow hint
+    if total_gst > 0:
+        suggestions.append(
+            f"Total GST collected over the term is about ₹ {total_gst:,.2f}. "
+            "GST is typically a pass-through and should not be counted as economic yield for the lessor."
+        )
+
+    if total_inflow_all > 0 and total_invested > 0:
+        inflow_multiple = total_inflow_all / total_invested
+        suggestions.append(
+            f"Total inflows (rentals + residual + deposit refund, incl GST) are about "
+            f"{inflow_multiple:.2f}× the total invested cost over the full term."
+        )
+
+    return suggestions
 
 
 # ------------ Streamlit app config ------------
@@ -180,7 +300,7 @@ if page == "Output Page":
     rent_incl = rent_excl + gst_per_period
 
     # --- PTPM / PTPQ (based on net financing) ---
-    ptpm = ptpq = None    # PTPM (monthly) or PTPQ (quarterly)
+    ptpm = ptpq = None
     if net_financing != 0:
         if I["payment_interval"] == 1:
             ptpm = rent_excl / (net_financing / 1000.0)
@@ -289,6 +409,9 @@ if page == "Output Page":
     mirr_excl = compute_irr(cf_excl)
     mirr_incl = compute_irr(cf_incl)
 
+    annual_irr_excl = (1 + mirr_excl) ** 12 - 1 if mirr_excl is not None else None
+    annual_irr_incl = (1 + mirr_incl) ** 12 - 1 if mirr_incl is not None else None
+
     # --- Summary display ---
     st.subheader("Summary")
 
@@ -320,20 +443,34 @@ if page == "Output Page":
     st.metric("Total Inflow (Rentals + GST + Residual + Deposit Refund)", f"{total_inflow_all:,.2f}")
 
     if mirr_excl is not None:
-        airr_excl = (1 + mirr_excl) ** 12 - 1
         st.write(f"**Monthly IRR (Excl GST):** {mirr_excl * 100:.4f}%")
-        st.write(f"**Annualised IRR (Excl GST):** {airr_excl * 100:.4f}%")
+        st.write(f"**Annualised IRR (Excl GST):** {annual_irr_excl * 100:.4f}%")
     else:
         st.warning("Could not compute IRR (Excl GST) – cashflow pattern has no valid IRR in search range.")
 
     st.markdown("---")
 
     if mirr_incl is not None:
-        airr_incl = (1 + mirr_incl) ** 12 - 1
         st.write(f"**Monthly IRR (Incl GST):** {mirr_incl * 100:.4f}%")
-        st.write(f"**Annualised IRR (Incl GST):** {airr_incl * 100:.4f}%")
+        st.write(f"**Annualised IRR (Incl GST):** {annual_irr_incl * 100:.4f}%")
     else:
         st.warning("Could not compute IRR (Incl GST) – cashflow pattern has no valid IRR in search range.")
+
+    # --- AI Suggestions ---
+    st.subheader("AI Suggestions")
+    suggestions = generate_ai_suggestions(
+        I,
+        rent_excl=rent_excl,
+        rent_incl=rent_incl,
+        total_invested=total_invested,
+        net_financing=net_financing,
+        total_gst=total_gst,
+        total_inflow_all=total_inflow_all,
+        annual_irr_excl=annual_irr_excl,
+        annual_irr_incl=annual_irr_incl,
+    )
+    for s in suggestions:
+        st.markdown(f"- {s}")
 
     # --- Amortisation table on screen ---
     st.subheader("Amortisation Schedule (Lessor View)")
@@ -358,7 +495,6 @@ if page == "Output Page":
     # --- Export to Excel ---
     st.subheader("Export")
 
-    # Build a summary dataframe for Excel
     summary_data = {
         "Parameter": [
             "Asset Cost",
@@ -418,15 +554,14 @@ if page == "Output Page":
             total_deposit_refund,
             total_inflow_all,
             mirr_excl * 100 if mirr_excl is not None else None,
-            ((1 + mirr_excl) ** 12 - 1) * 100 if mirr_excl is not None else None,
+            annual_irr_excl * 100 if annual_irr_excl is not None else None,
             mirr_incl * 100 if mirr_incl is not None else None,
-            ((1 + mirr_incl) ** 12 - 1) * 100 if mirr_incl is not None else None,
+            annual_irr_incl * 100 if annual_irr_incl is not None else None,
         ],
     }
 
     summary_df = pd.DataFrame(summary_data)
 
-    # Create Excel in memory
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         summary_df.to_excel(writer, sheet_name="Summary", index=False)
