@@ -186,10 +186,17 @@ def generate_ai_suggestions(I, rent_excl, rent_incl,
 
 st.set_page_config(page_title="LeasePro - Lease Calculator", layout="wide")
 
-page = st.sidebar.radio("Navigation", ["Input Page", "Output Page"])
+# Initialise page in session_state
+if "page" not in st.session_state:
+    st.session_state.page = "Input Page"
 
-if "inputs" not in st.session_state:
-    st.session_state.inputs = {}
+# Sidebar navigation (no key, we control via index)
+page = st.sidebar.radio(
+    "Navigation",
+    ["Input Page", "Output Page"],
+    index=0 if st.session_state.page == "Input Page" else 1,
+)
+
 
 # ------------ PAGE 1: INPUTS ------------
 
@@ -241,6 +248,7 @@ if page == "Input Page":
         gst_rate = st.number_input("GST Rate (%)", value=18.0, step=1.0)
         gst_inside_emi = st.checkbox("Show EMI as GST-inclusive amount (customer view)", value=True)
 
+    # ---------- AUTO-SWITCH BUTTON ----------
     if st.button("Save & Go to Output Page"):
         st.session_state.inputs = {
             "asset_cost": float(asset_cost),
@@ -260,7 +268,12 @@ if page == "Input Page":
             "gst_inside_emi": bool(gst_inside_emi),
             "payment_timing": payment_timing,
         }
-        st.success("Inputs saved. Switch to 'Output Page' from the left.")
+
+        # 🔥 THIS LINE AUTO-SWITCHES TO OUTPUT PAGE
+        st.session_state.page = "Output Page"
+
+        st.rerun()
+
 
 # ------------ PAGE 2: OUTPUTS ------------
 
